@@ -634,7 +634,7 @@
         "options": {
           "awaitWriteFinish": true,
           "followSymlinks": false,
-          "ignored": ".DS_Store",
+          "ignored": "**/.DS_Store",
           "ignoreInitial": true,
           "depth": -1,
           "usePolling": false
@@ -947,7 +947,7 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "416ddef7-b105-4842-b073-19be13c23cda",
+  "versionId": "4cf8e1e2-c427-4337-98b7-f6657875d9c2",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "12b408838e33f12bf8886792e6d44de0d9623e2bbf833b70f9f2e13fdf802706"
