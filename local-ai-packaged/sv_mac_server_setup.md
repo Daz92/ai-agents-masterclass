@@ -1,29 +1,68 @@
 # Complete Guide: Exposing Open WebUI to Internet (macOS)
 
 ## Overview
-A comprehensive guide to securely expose Open WebUI to the internet from your macOS system using Nginx as a reverse proxy with SSL encryption.
-
-## Table of Contents
-1. [Prerequisites](#prerequisites)
-2. [Installation](#installation)
-3. [Directory Setup](#directory-setup)
-4. [Domain Configuration](#domain-configuration)
-5. [Nginx Configuration](#nginx-configuration)
-6. [SSL Certificate Setup](#ssl-certificate-setup)
-7. [Service Management](#service-management)
-8. [Security and Maintenance](#security-and-maintenance)
-9. [Troubleshooting](#troubleshooting)
+This guide describes how to securely expose Open WebUI to the internet from your macOS system using Nginx as a reverse proxy with SSL encryption.
 
 ## Prerequisites
 - macOS system
 - Docker Desktop installed and running
 - Administrative access
 - A registered domain name with DNS access
-- Open WebUI running in Docker (port 3000:8080)
+- Open WebUI running in Docker (port 3000)
 
-## Installation
+## Common Issues & Solutions
+1. **SSL Certificate Permission Issues**
+   - Symptoms: nginx unable to read SSL certificates
+   - Solution: Correct permissions for SSL directories and files
+   ```bash
+   sudo chmod 755 /etc/letsencrypt/live
+   sudo chmod 755 /etc/letsencrypt/archive
+   sudo chmod 755 /etc/letsencrypt/live/your-domain.com
+   sudo chmod 755 /etc/letsencrypt/archive/your-domain.com
+   sudo chmod 644 /etc/letsencrypt/archive/your-domain.com/*.pem
+   ```
 
-### 1. Install Required Software
+2. **Port Conflicts**
+   - Symptoms: "Address already in use" errors
+   - Solution: Check and kill processes using required ports
+   ```bash
+   sudo lsof -i :8081
+   sudo lsof -i :8082
+   sudo pkill -f nginx
+   ```
+
+3. **Router Configuration**
+   - Symptoms: Site unreachable from external networks
+   - Solution: Proper port forwarding in router
+     - Forward external port 80 → internal port 8082
+     - Forward external port 443 → internal port 8081
+     - Use correct local IP (check with `ifconfig`)
+
+## Step-by-Step Setup
+
+### 1. Initial Cleanup
+```bash
+# Stop any running nginx
+brew services stop nginx
+
+# Kill any nginx processes
+sudo pkill -f nginx
+
+# Remove old configurations
+rm -rf /opt/homebrew/etc/nginx/nginx.conf
+rm -rf /opt/homebrew/etc/nginx/conf.d/*
+
+# Clean up SSL related files (if any)
+sudo rm -rf /etc/letsencrypt
+
+# Remove any port forwarding rules
+sudo pfctl -F all -f /etc/pf.conf
+
+# Clean up SSL related files (if any)
+sudo rm -rf /etc/letsencrypt
+```
+
+### 2. Install Required Software
 ```bash
 # Install Homebrew if not already installed
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -33,53 +72,23 @@ brew install nginx
 brew install certbot
 ```
 
-## Directory Setup
-
-### 1. Create Required Directories
+### 3. Prepare Directory Structure
 ```bash
-# Create necessary directories
-sudo mkdir -p /opt/homebrew/etc/nginx/conf.d
 sudo mkdir -p /opt/homebrew/var/log/nginx
 sudo mkdir -p /opt/homebrew/var/run/nginx
+sudo mkdir -p /opt/homebrew/etc/nginx/conf.d
 
-# Set correct permissions
-sudo chown -R $(whoami) /opt/homebrew/etc/nginx
 sudo chown -R $(whoami) /opt/homebrew/var/log/nginx
 sudo chown -R $(whoami) /opt/homebrew/var/run/nginx
-sudo chown -R $(whoami) /opt/homebrew/Cellar/nginx
-sudo chown -R $(whoami) /opt/homebrew/opt/nginx
-sudo chown -R $(whoami) /opt/homebrew/var/homebrew/linked/nginx
+sudo chown -R $(whoami) /opt/homebrew/etc/nginx
 ```
 
-## Domain Configuration
-
-### 1. Get Server IP
+### 4. Configure Nginx
 ```bash
-curl ifconfig.me
-```
-
-### 2. Configure DNS
-Add an A record in your domain provider's DNS settings:
-- Type: A
-- Host: your desired subdomain (e.g., 'openwebui')
-- Value: Your server's public IP
-- TTL: Lowest available (typically 300 seconds)
-
-### 3. Verify DNS Propagation
-```bash
-dig your-subdomain.yourdomain.com
-```
-
-## Nginx Configuration
-
-### 1. Create Main Configuration
-```bash
-# Backup existing config if present
-cp /opt/homebrew/etc/nginx/nginx.conf /opt/homebrew/etc/nginx/nginx.conf.backup 2>/dev/null
-
-# Create new main config
 cat > /opt/homebrew/etc/nginx/nginx.conf <<EOL
 worker_processes  1;
+error_log  /opt/homebrew/var/log/nginx/error.log;
+pid        /opt/homebrew/var/run/nginx/nginx.pid;
 
 events {
     worker_connections  1024;
@@ -90,6 +99,9 @@ http {
     default_type  application/octet-stream;
     client_max_body_size 0;
 
+    access_log  /opt/homebrew/var/log/nginx/access.log;
+    error_log   /opt/homebrew/var/log/nginx/error.log;
+
     sendfile        on;
     keepalive_timeout  65;
 
@@ -99,241 +111,123 @@ http {
         ''      close;
     }
 
-    include /opt/homebrew/etc/nginx/conf.d/*.conf;
-}
-EOL
-```
+    # HTTP Server (Redirect to HTTPS)
+    server {
+        listen       8082;
+        server_name  your-domain.com;
+        return 301 https://\$server_name\$request_uri;
+    }
 
-### 2. Create Open WebUI Configuration
-```bash
-# Replace ACTUAL_DOMAIN with your domain (e.g., open-webui.dcphotozon.com)
-DOMAIN="ACTUAL_DOMAIN"
+    # HTTPS Server (SSL configuration will be added by certbot)
+    server {
+        listen       8081;           # certbot will modify this to include ssl
+        server_name  your-domain.com;
 
-cat > /opt/homebrew/etc/nginx/conf.d/openwebui.conf <<EOL
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $DOMAIN;  # Your actual domain
+        # Note: SSL certificate paths will be automatically added by certbot
+        # when running: sudo certbot --nginx -d your-domain.com
 
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-
-        # WebSocket timeout settings
-        proxy_read_timeout 300;
-        proxy_connect_timeout 300;
-        proxy_send_timeout 300;
+        location / {
+            proxy_pass http://localhost:3000;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_set_header Host \$host;
+            proxy_cache_bypass \$http_upgrade;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+        }
     }
 }
 EOL
 ```
 
-### 3. Enable Port 80/443 Access
-Since we're running nginx as a non-root user, we need to allow it to bind to privileged ports:
+### 5. Set Up Port Forwarding
 ```bash
-sudo tee /Library/LaunchDaemons/com.nginx.privileged-ports.plist > /dev/null <<EOL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.nginx.privileged-ports</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>echo "net.inet.ip.portrange.reservedhigh=0" | sudo tee /etc/sysctl.conf && sudo sysctl -w net.inet.ip.portrange.reservedhigh=0</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-</dict>
-</plist>
+# Create port forwarding rules
+sudo tee /etc/pf.anchors/nginx <<EOL
+rdr pass on lo0 inet proto tcp from any to any port 80 -> 127.0.0.1 port 8082
+rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port 8081
 EOL
 
-sudo launchctl load -w /Library/LaunchDaemons/com.nginx.privileged-ports.plist
+# Enable the rules
+sudo pfctl -F all
+sudo pfctl -ef /etc/pf.anchors/nginx
 ```
 
-### 4. Test Configuration
+### 6. Configure SSL with Certbot
 ```bash
+sudo certbot --nginx -d your-domain.com
+```
+
+### 7. Configure Router
+1. Get your local IP:
+```bash
+ifconfig | grep "inet " | grep -v 127.0.0.1
+# Note the IP address on your main network (usually 192.168.1.x)
+```
+
+2. Access router admin interface (typically 192.168.1.1)
+3. Add port forwarding rules:
+   - External Port: 80 → Internal IP: [Your Local IP], Internal Port: 8082
+   - External Port: 443 → Internal IP: [Your Local IP], Internal Port: 8081
+
+### 8. Verify Setup
+```bash
+# Check nginx configuration
 nginx -t
-```
 
-## Port Forwarding Setup
-
-### 1. Get Your Local IP
-```bash
-# Find your local IP address
-ifconfig | grep "inet " | grep -v 127.0.0.1
-```
-
-### 2. Configure Router Port Forwarding
-1. Access your router's admin interface
-2. Locate port forwarding settings
-3. Add two port forwarding rules:
-   - Forward port 80 to your local IP
-   - Forward port 443 to your local IP
-
-### 3. Verify Port Configuration
-```bash
-# Find your local IP address
-ifconfig | grep "inet " | grep -v 127.0.0.1
-# Expected output something like:
-# inet 192.168.1.100 netmask 0xffffff00 broadcast 192.168.1.255
-
-# Check if nginx is listening on port 80
-sudo lsof -i :80
-# Expected output something like:
-# COMMAND  PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
-# nginx   1234 user    6u  IPv4 0xc123456789012345      0t0  TCP *:http (LISTEN)
-
-# Test local port 80 access
-nc -zv localhost 80
-# Expected output:
-# Connection to localhost port 80 [tcp/http] succeeded!
-
-# Optional: Check all listening ports
-netstat -an | grep LISTEN
-# Should show entries for port 80 and 443 like:
-# tcp4       0      0  *.80      *.*    LISTEN
-```
-
-✅ If you see similar outputs, your local configuration is correct.
-❌ If outputs differ, check nginx status and port configurations.
-
-After verifying local access, test internet accessibility:
-1. Visit: https://www.yougetsignal.com/tools/open-ports/
-2. Enter your public IP
-3. Check ports 80 and 443
-4. Status should show as "Open" for both ports
-
-### 4. Prepare and Obtain SSL Certificate
-```bash
-# Create symbolic link for certbot to find nginx configuration
-sudo mkdir -p /usr/local/etc
-sudo ln -s /opt/homebrew/etc/nginx /usr/local/etc/nginx
-
-# Verify the symbolic link
-ls -l /usr/local/etc/nginx
-
-# Obtain the certificate
-sudo certbot --nginx -d $DOMAIN  # Use your actual domain (e.g., open-webui.dcphotozon.com)
-```
-
-When running the certbot command, you'll be prompted for:
-1. An email address for:
-   - Certificate expiration notifications
-   - Security alerts
-   - Issues with your certificates
-2. Agreement to Let's Encrypt's Terms of Service
-3. Whether to share your email with EFF (Electronic Frontier Foundation)
-
-Example response to email prompt:
-```
-your.email@example.com
-```
-
-
-### 3. Fix Certbot Permissions
-```bash
-sudo chown -R $(whoami) /opt/homebrew/etc/nginx
-```
-
-## Service Management
-
-### 1. Start Nginx
-```bash
+# Start nginx
 brew services start nginx
-```
 
-### 2. Verify Status
-```bash
-brew services list
-curl -I http://localhost
-```
+# Verify ports are listening
+sudo lsof -i -P | grep nginx
 
-## Security and Maintenance
+# Test local access
+curl http://localhost:8082
+curl -k https://localhost:8081
 
-### 1. Regular Updates
-```bash
-# Update software
-brew update
-brew upgrade nginx certbot
-
-# Update Docker containers
-docker-compose pull
-docker-compose up -d
-```
-
-### 2. Certificate Renewal
-Add to your user's crontab (not root's):
-```bash
-(crontab -l 2>/dev/null; echo "0 0 1 * * /opt/homebrew/bin/certbot renew --quiet") | crontab -
-```
-
-### 3. Backup Configuration
-```bash
-# Create backup directory
-mkdir -p ~/nginx-backups
-cp -r /opt/homebrew/etc/nginx ~/nginx-backups/nginx-$(date +%Y%m%d)
+# Check certificate status
+sudo certbot certificates
 ```
 
 ## Troubleshooting
 
-### Common Issues
+### Common Error Messages and Solutions
 
-1. **Permission Denied**
+1. **"Address already in use"**
 ```bash
-# Fix ownership
-sudo chown -R $(whoami) /opt/homebrew/etc/nginx
-sudo chown -R $(whoami) /opt/homebrew/var/log/nginx
-sudo chown -R $(whoami) /opt/homebrew/var/run/nginx
+sudo lsof -i :8081  # Check what's using the port
+sudo lsof -i :8082
+sudo pkill -f nginx  # Kill nginx processes
+brew services restart nginx
 ```
 
-2. **Port Binding Issues**
+2. **SSL Certificate Issues**
 ```bash
-# Verify port settings
-sudo sysctl net.inet.ip.portrange.reservedhigh
-# Should return 0
+# Check certificate permissions
+sudo ls -l /etc/letsencrypt/live/your-domain.com/
+sudo ls -l /etc/letsencrypt/archive/your-domain.com/
 
-# Check port usage
-sudo lsof -i :80
-sudo lsof -i :443
+# Fix permissions
+sudo chmod -R 755 /etc/letsencrypt/live
+sudo chmod -R 755 /etc/letsencrypt/archive
 ```
 
-3. **SSL Certificate Issues**
-```bash
-# Test renewal
-certbot renew --dry-run
-```
+3. **Site Unreachable**
+- Verify router port forwarding
+- Check nginx logs: `tail -f /opt/homebrew/var/log/nginx/error.log`
+- Verify DNS propagation: `dig your-domain.com`
+- Check port status: Use online port checker tool
 
-4. **502 Bad Gateway**
-```bash
-# Check logs
-tail -f /opt/homebrew/var/log/nginx/error.log
-
-# Verify Open WebUI is running
-docker ps
-curl http://localhost:3000
-```
-
-## Additional Notes
-- Keep regular backups of configurations
-- Monitor logs for unusual activity
-- Check certificate expiration dates regularly
-- Test configuration changes in a staging environment
+## Maintenance
+- Update software: `brew upgrade nginx certbot`
+- Renew certificate: `sudo certbot renew`
+- Monitor logs: `tail -f /opt/homebrew/var/log/nginx/error.log`
 
 ## Version History
-v1.1 - Updated (2024-02-16)
-- Added proper permission handling
-- Added port binding solution for non-root nginx
-- Improved security configurations
-- Enhanced troubleshooting section
-
-v1.0 - Initial Release (2024-02-16)
+v3.0 - (2024-02-16): Added comprehensive troubleshooting guide
+v2.2 - (2024-02-16): Updated Nginx configuration with improved WebSocket support
+v2.1 - (2024-02-16): Reordered steps for logical flow
+v2.0 - (2024-02-16): Added cleanup section
+v1.0 - Initial Release
